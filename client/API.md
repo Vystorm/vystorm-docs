@@ -1,14 +1,14 @@
 # Vystorm Client – Server Integration API
 
-Reference for building **server-side integrations** for the Vystorm Client mod: in-game web overlays and native HUD
-elements. It is written to be self-contained, so a developer or an AI coding assistant can implement an integration
+Reference for building **server-side integrations** for the Vystorm Client mod: one-key web page sign-in and native
+HUD elements. It is written to be self-contained, so a developer or an AI coding assistant can implement an integration
 without seeing the mod's source code. All names, types and limits below are taken from the mod's code.
 
 | | |
 |---|---|
-| Mod | Vystorm Client **0.6.0** (Fabric, Minecraft **26.2**, Java 25), client-side only |
+| Mod | Vystorm Client **0.7.0** (Fabric, Minecraft **26.2**, Java 25), client-side only, no other mods needed besides Fabric API |
 | Protocol | version **2** (the mod accepts servers speaking version 1 or 2) |
-| Channels | `vystorm:web` (handshake, web overlay) and `vystorm:ui` (native elements) |
+| Channels | `vystorm:web` (handshake, web pages) and `vystorm:ui` (native elements) |
 | Server reference implementation | **Vystorm Core** (Paper/Purpur 26.2 plugin), 0.21.0 or newer for protocol 2 |
 | License | MIT |
 
@@ -21,7 +21,7 @@ without seeing the mod's source code. All names, types and limits below are take
 3. [Path A – Vystorm Core Java API (recommended)](#3-path-a--vystorm-core-java-api-recommended)
 4. [Protocol reference](#4-protocol-reference)
 5. [Native elements (`vystorm:ui`) – JSON schema](#5-native-elements-vystormui--json-schema)
-6. [Web overlay – what your web pages must do](#6-web-overlay--what-your-web-pages-must-do)
+6. [Web pages – what your web pages must do](#6-web-pages--what-your-web-pages-must-do)
 7. [Trust and security model](#7-trust-and-security-model)
 8. [Path B – raw plugin messages without Core](#8-path-b--raw-plugin-messages-without-core)
 9. [Errors, rejections and troubleshooting](#9-errors-rejections-and-troubleshooting)
@@ -38,9 +38,9 @@ without seeing the mod's source code. All names, types and limits below are take
 2. **The client is never an authority.** Plugin messages only carry the handshake, one-time login tokens, "show page X"
    and display data. Every game action goes through normal commands or your authenticated web API – never through
    these channels. Treat everything the client sends as untrusted hints.
-3. **The player decides.** The overlay only loads a server's web pages after the player allowed that exact web origin
-   for that server (a dialog the player opens with a key press – the server can never pop it up). Plan for players who
-   never allow it.
+3. **The player decides.** The mod only opens a server's web pages – in the player's own browser, on the player's key
+   press – after the player allowed that exact web origin for that server (a dialog the player opens with a key press –
+   the server can never pop it up). Plan for players who never allow it.
 4. **Validate before sending, expect rejections.** The client validates strictly and rejects rather than "repairs"
    (out-of-range numbers, unknown element types, bad colors …). Invalid data is dropped and reported back (REJECT).
 5. **Rate-limit and batch.** At most one PATCH per element per tick; progress bars and cooldowns at most ~4 updates per
@@ -53,7 +53,7 @@ without seeing the mod's source code. All names, types and limits below are take
 |---|---|---|
 | Platform | Paper/Purpur 26.2 + Vystorm Core | any server that can send custom payloads |
 | Handshake, versioning, rate limits, batching | done by Core | you implement them |
-| Web overlay (login tokens, sessions, CSRF, pages) | Core's web platform (`web.enabled: true`) | you need your own web backend (see §6, §8.4) |
+| Web pages (login tokens, sessions, CSRF) | Core's web platform (`web.enabled: true`) | you need your own web backend (see §6, §8.4) |
 | Native HUD elements | `ClientUi` + typed `ClientElement` builders | JSON over `vystorm:ui` |
 | Validation | Core validates with the same schema as the client | you validate (or read REJECTs) |
 
@@ -86,16 +86,16 @@ try {
 
 ### 3.2 Core configuration (`plugins/vystorm_core/config.yml`)
 
-The web overlay needs Core's web platform: `web.enabled: true` and a `web.public-url` that players can reach (this
+Opening web pages needs Core's web platform: `web.enabled: true` and a `web.public-url` that players can reach (this
 URL is what the mod pins and shows to the player; use `https`). Native elements work even when the web platform is
 off.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `web.client.enabled` | `true` | Register `vystorm:web` / `vystorm:ui`. `false` = the mod sees a vanilla server. |
-| `web.client.overlay` | `true` | Allow the in-game overlay (WELCOME flag `SERVER_OVERLAY`); otherwise the mod opens the system browser. |
-| `web.client.preload` | `true` | Allow the mod to sign in its hidden browser right after joining (instant opening later). |
-| `web.client.hotkey-module` | `skills` | Module the overlay key (K) opens; `""` = overview. Ignored if the module is not registered. |
+| `web.client.overlay` | `true` | WELCOME flag `SERVER_OVERLAY` (in-game display allowed). Mod 0.7.0 has no in-game display and always uses the system browser, so this has no visible effect for it. |
+| `web.client.preload` | `true` | Hidden sign-in right after joining. Only used by mods up to 0.6.0; 0.7.0 never asks. |
+| `web.client.hotkey-module` | `skills` | Module the web key (K) opens; `""` = overview. Ignored if the module is not registered. |
 | `web.client.open-per-minute` | `10` | Token requests per minute and player (burst 3). |
 | `web.client.end-sessions-on-quit` | `client` | `client` / `all` / `none`: which web sessions end when the player quits. |
 | `web.client.ui.enabled` | `true` | Native elements channel (`vystorm:ui`). |
@@ -104,32 +104,32 @@ off.
 | `web.client.ui.per-tick` | `32` | Messages per player per tick. |
 | `web.client.ui.queue-limit` | `384` | Queued messages per player; more → `QUEUE_FULL`, dropped. |
 
-### 3.3 `ClientServices` – handshake state and the overlay
+### 3.3 `ClientServices` – handshake state and SHOW
 
 | Member | Description |
 |---|---|
-| `CAP_BROWSER_OVERLAY = 1` | Embedded browser available (the mod found the optional Rinku library and its safety checks passed). |
+| `CAP_BROWSER_OVERLAY = 1` | In-game page display. **Mod 0.7.0 never sets it** (pages open in the system browser); 0.6.0 and older set it when their optional embedded browser was usable. Reserved. |
 | `CAP_EXTERNAL_BROWSER = 2` | Can open the login link in the system browser (always set). |
 | `CAP_HUD = 4` | `panel`, `bar`, `slots`. |
 | `CAP_TOASTS = 8` | Toasts. |
 | `CAP_MARKERS = 16` | World markers. |
 | `CAP_TOOLTIPS = 32` | Tooltip rules. |
-| `CAP_JS_BRIDGE = 64` | `window.vystormQuery` in the overlay. |
+| `CAP_JS_BRIDGE = 64` | `window.vystormQuery` in the overlay (0.6.0 and older; 0.7.0 never sets it). |
 | `STATE_UI_HIDDEN = 1` | Player hid the native elements (key H). |
-| `STATE_OVERLAY_OPEN = 2` | Overlay is open. |
-| `STATE_ORIGIN_TRUSTED = 4` | Player allowed the web origin and the client would follow a `show` (protocol 2). A hint, not a permission. |
+| `STATE_OVERLAY_OPEN = 2` | In-game display is open (never set by 0.7.0). |
+| `STATE_ORIGIN_TRUSTED = 4` | Player allowed the web origin and the client would follow a `show` (protocol 2). A hint, not a permission. Never set by 0.7.0, which never opens pages on server request. |
 | `boolean hasClient(Player)` | Handshake completed (the player has the mod). |
 | `int capabilities(Player)` | `CAP_*` bits from the handshake, `0` without the mod. |
 | `int clientState(Player)` | Last reported `STATE_*` bits, `0` without the mod. |
 | `boolean originTrusted(Player)` | `STATE_ORIGIN_TRUSTED` is set. |
 | `boolean uiHidden(Player)` | `STATE_UI_HIDDEN` is set. |
 | `boolean uiAvailable(Player, int capability)` | The player accepts native elements with this capability (and `web.client.ui` is on). |
-| `boolean overlayAvailable(Player)` | Mod with embedded browser, overlay allowed by config, web platform running, **and** the player trusts the origin (protocol 2: trust bit; protocol 1: after the first token in this connection). |
+| `boolean overlayAvailable(Player)` | Mod with in-game display (`CAP_BROWSER_OVERLAY`), overlay allowed by config, web platform running, **and** the player trusts the origin (protocol 2: trust bit; protocol 1: after the first token in this connection). Always `false` for mod 0.7.0. |
 | `boolean show(Player, String moduleId, String page)` | Sends SHOW. `moduleId` = registered web module or `""` (overview); `page` = relative page (§4.6) or `""` (where the login redirect lands). Returns `false` when not possible (no mod, overlay not available, invalid/unregistered module, invalid page, rate limit 0.5/s burst 3) – then open your normal menu. |
 | `boolean close(Player, String moduleId)` | Sends CLOSE (`""`/`null` = whatever module is open). |
 | `boolean enabled()` | The client channel runs (`web.client.enabled`). |
 
-Pattern – overlay instead of a chest menu:
+Pattern – in-game page instead of a chest menu (with mod 0.7.0 `show` returns `false`, so the menu opens):
 
 ```java
 // e.g. /shop or right-click on an NPC
@@ -138,7 +138,8 @@ openChestMenu(player);                                                // everyon
 ```
 
 `show` does not grant anything: the mod then signs in with a one-time token that is checked exactly like `/web`, and
-every API call of the page is checked like in a normal browser. Register the web module itself with
+every API call of the page is checked like in a normal browser. Players with mod 0.7.0 open the web interface
+themselves with **K** (in their browser, already signed in); `WebServices.openOrLink` gives them a chat link instead. Register the web module itself with
 `WebServices.register(plugin, WebModule.builder(id, title)…build())` (see Core's README, "Web platform").
 
 ### 3.4 `ClientUi` – native elements
@@ -263,7 +264,7 @@ public final class LevelHud implements Listener {
 
 | Channel | Purpose |
 |---|---|
-| `vystorm:web` | Handshake, web overlay (tokens, open/close, client state) |
+| `vystorm:web` | Handshake, web pages (tokens, open/close, client state) |
 | `vystorm:ui` | Native elements: HUD, toasts, world markers, tooltip rules |
 
 Both are ordinary custom-payload plugin channels. The payload is the raw message bytes (no extra length prefix).
@@ -305,40 +306,42 @@ After **20 malformed messages** in one connection the client switches the protoc
 
 ### 4.3 Bit fields
 
-**HELLO `capabilities`** (mod 0.6.0 always sets bits 1–5; bits 0 and 6 only when the embedded browser is usable):
+**HELLO `capabilities`** (mod 0.7.0 always sends exactly bits 1–5 = `62`; 0.6.0 and older also set bits 0 and 6 when
+their optional embedded browser was usable):
 
 | Bit | Value | Name | Meaning |
 |---|---|---|---|
-| 0 | 1 | `BROWSER_OVERLAY` | Embedded browser available and secured |
+| 0 | 1 | `BROWSER_OVERLAY` | In-game page display (0.6.0 and older: embedded browser); reserved |
 | 1 | 2 | `EXTERNAL_BROWSER` | Can open the login link in the system browser |
 | 2 | 4 | `HUD` | `panel`, `bar`, `slots` |
 | 3 | 8 | `TOASTS` | Toasts |
 | 4 | 16 | `MARKERS` | World markers |
 | 5 | 32 | `TOOLTIPS` | Tooltip rules |
-| 6 | 64 | `JS_BRIDGE` | `window.vystormQuery` in the overlay |
+| 6 | 64 | `JS_BRIDGE` | `window.vystormQuery` in the overlay (0.6.0 and older) |
 
-**WELCOME `serverFlags`:** bit 0 (`1`) `SERVER_OVERLAY` = overlay allowed (otherwise only the system browser);
+**WELCOME `serverFlags`:** bit 0 (`1`) `SERVER_OVERLAY` = in-game display allowed (otherwise only the system browser);
 bit 1 (`2`) `SERVER_UI` = server sends native elements (without it the client ignores all `vystorm:ui` messages).
 
 **CLIENT_STATE `flags`:** bit 0 (`1`) `UI_HIDDEN`; bit 1 (`2`) `OVERLAY_OPEN`; bit 2 (`4`) `ORIGIN_TRUSTED`
-(protocol 2 only: the player allowed the pinned origin for this server, the server allows the overlay, the embedded
-browser is usable and the player has not disabled server-opened pages – i.e. a SHOW would be followed now).
+(protocol 2 only: the player allowed the pinned origin for this server, the server allows the in-game display, the
+client has one and the player has not disabled server-opened pages – i.e. a SHOW would be followed now). Mod 0.7.0
+never sets bits 1 and 2.
 
 ### 4.4 `vystorm:web` – client → server
 
 | ID | Name | Fields |
 |---|---|---|
 | `0x01` | HELLO | `VarInt minVersion` (1..255), `VarInt maxVersion` (≥ min, ≤ 255), `String(32) modVersion`, `String(16) loader` (`fabric`/`neoforge`), `VarInt capabilities` |
-| `0x03` | OPEN_REQUEST | `VarInt requestId` (≥ 1, unique per connection), `String(32) module` (`[a-z0-9-]{1,32}` or `""` = overview), `VarInt target` (0 = overlay, 1 = external browser, 2 = preload/hidden sign-in) |
-| `0x07` | CLOSED | `String(32) module`, `VarInt reason` (0..15; 0 = player, 1 = server; 2 = error and 3 = blocked navigation are reserved, 0.6.0 sends only 0 and 1) |
+| `0x03` | OPEN_REQUEST | `VarInt requestId` (≥ 1, unique per connection), `String(32) module` (`[a-z0-9-]{1,32}` or `""` = overview), `VarInt target` (0 = in-game display, 1 = external browser, 2 = preload/hidden sign-in; mod 0.7.0 sends only 1) |
+| `0x07` | CLOSED | `String(32) module`, `VarInt reason` (0..15; 0 = player, 1 = server; 2 = error and 3 = blocked navigation are reserved, 0.6.0 sent only 0 and 1, 0.7.0 sends none) |
 | `0x08` | CLIENT_STATE | `VarInt flags` (0..0xFFFF, bits §4.3) |
 
 - HELLO is sent **once per connection**.
 - CLIENT_STATE is sent right after WELCOME (also with `flags = 0`) and on every change (checked at most once per second
   when nothing visible changes).
-- The mod sends OPEN_REQUEST when the player presses the overlay key, after a SHOW (§4.7), for preloading right after
-  WELCOME (only if the origin is already trusted, preloading is enabled and the embedded browser is usable), and for
-  the JS bridge op `reauth`.
+- Mod 0.7.0 sends OPEN_REQUEST only when the player presses the web key (K): for a waiting SHOW/OPEN module (§4.7) or
+  for `hotkeyModule`, always with `target = 1`. (0.6.0 and older also sent it for preloading right after WELCOME and
+  for the JS bridge op `reauth`.)
 
 ### 4.5 `vystorm:web` – server → client
 
@@ -359,52 +362,50 @@ browser is usable and the player has not disabled server-opened pages – i.e. a
   Client-side validity: `min(ttlSeconds, 600)` seconds.
 - **OPEN** with `requestId > 0` is only accepted if it matches an own pending request **with the same module**
   (pending ≤ 30 s, each ID once). `requestId = 0` (server-initiated) is only accepted with `SERVER_OVERLAY`, is
-  rate-limited together with SHOW (0.5/s, burst 3), is ignored if the player disabled server-opened pages, and its
-  token is discarded unused if the player has not allowed the origin.
-- **title** is shown grey next to the origin in the overlay's top bar (sanitized, shortened; it can never cover the
-  origin).
-- **DENIED** for a hidden preload request is silent (mod 0.6.0+) unless the player is already waiting in the overlay.
+  rate-limited together with SHOW (0.5/s, burst 3) and is ignored if the player disabled server-opened pages. Mod 0.7.0
+  always discards its token unused and only shows the "press K" hint; older mods used it only for an allowed origin.
+- **title** is not shown by mod 0.7.0 (older mods showed it in the overlay's top bar).
+- **DENIED** is shown to the player as a toast (`message`, or a generic text). DENIED for a hidden preload request
+  (mods up to 0.6.0) is silent.
 
 ### 4.6 Pages (SHOW `page`)
 
 `page` is a path on the pinned origin plus an optional fragment, e.g. `/app/skills#node/12` or `/m/shop/#npc/12`.
 Allowed: `/[A-Za-z0-9/_=&.,:~+-]{0,159}(#[A-Za-z0-9/_=&.,:~+-]{0,127})?` and no `..`, no `//`, no query (`?`), no
-`%`. `""` = the page the login redirect lands on. The server knows its page paths; the client never guesses.
+`%`. `""` = the page the login redirect lands on. The server knows its page paths; the client never guesses. Only an
+in-game display uses `page`; the system browser (mod 0.7.0) lands where the login redirect goes.
 
 ### 4.7 Flows
 
 **Join**
 ```
 Client                                   Server
-  ── HELLO(1..2, caps) ─────────────────▶  remember caps; pick version
+  ── HELLO(1..2, caps = 62) ────────────▶  remember caps; pick version
   ◀──────────── WELCOME(2, webBase, hotkeyModule, OVERLAY|UI)
-  ── CLIENT_STATE(flags) ────────────────▶  ORIGIN_TRUSTED set? → SHOW possible
+  ── CLIENT_STATE(flags) ────────────────▶  0.7.0: never ORIGIN_TRUSTED → use your normal menus
   ◀──────────── vystorm:ui PUT … (HUD, markers, tooltip rules)
-  [origin trusted + browser usable + preload on]
-  ── OPEN_REQUEST(id, hotkeyModule, 2) ──▶  same checks as a web login link
-  ◀──────────── OPEN(id, module, token, ttl, title)
-  hidden browser loads <webBase>/login#token → your app page (session cookie set)
 ```
 
-**Overlay key (K)** – if a server SHOW is waiting, it opens that; otherwise `hotkeyModule`. If the origin is not
-trusted yet, the trust dialog opens (only on this key press). Warm browser (signed in less than 20 min ago) → shown
-immediately; a `page` is navigated inside the origin, no new token. Otherwise `OPEN_REQUEST(target 0)` → `OPEN` →
-visible sign-in (timeout 20 s → "Sign-in failed").
+**Web key (K)** – if a server SHOW or OPEN is waiting, the key opens that module; otherwise `hotkeyModule`. If the
+origin is not trusted yet, the trust dialog opens (only on this key press). Then:
+```
+  ── OPEN_REQUEST(id, module, 1) ────────▶  same checks as a web login link
+  ◀──────────── OPEN(id, module, token, ttl, title)
+  system browser opens <webBase>/login#token → your /login page → your app page
+```
+Every key press fetches a fresh token; the mod keeps no session of its own.
 
-**Server SHOW instead of a chest menu** – send SHOW only if the client announced `BROWSER_OVERLAY` and would follow
-it: protocol 2 → `ORIGIN_TRUSTED` in the last CLIENT_STATE; protocol 1 → after the client fetched a token in this
-connection. The client follows SHOW at most 0.5/s (burst 3), only if no other screen is open (otherwise it shows a
-toast "press K") and only for an allowed origin (otherwise the same hint; the dialog never opens on server
-initiative). A cold client requests its own token for `module` and navigates to `page` after signing in.
+**Server SHOW / OPEN with `requestId 0`** – mod 0.7.0 never opens the browser on server initiative. It remembers the
+module, shows a toast "The server wants to show a page – press K" (at most 0.5/s, burst 3, only with `SERVER_OVERLAY`,
+not if the player disabled server-opened pages) and discards any token from such an OPEN. Core only sends SHOW to
+clients that announce `BROWSER_OVERLAY` and report `ORIGIN_TRUSTED`, so it never sends one to 0.7.0.
 
-**No embedded browser** – the client asks with `target = 1` and opens the login link in the system browser (after the
-same trust dialog), instead of the server posting a chat link.
+**CLOSE** – nothing to close in game; ignored by 0.7.0. **Disconnect** – the client drops all elements, downloaded
+images and web state. The browser session stays in the player's browser; end sessions from mod tokens on quit (Core:
+`web.client.end-sessions-on-quit`).
 
-**Close** – Esc (or JS bridge `close`) → `CLOSED(module, 0)`; your CLOSE → `CLOSED(module, 1)`. The browser stays
-signed in invisibly (1 fps, muted) until disconnect or `keepWarmMinutes` (default 30) without use.
-
-**Disconnect** – the client closes the browser, deletes its cookies/storage (own in-memory browser context) and drops
-all elements and downloaded images.
+**0.6.0 and older** (optional embedded browser): preloaded a hidden browser with `target = 2` after WELCOME, showed
+SHOW/K as an in-game overlay (`target = 0`) and sent `CLOSED` on Esc or CLOSE.
 
 ### 4.8 Client-side limits (`vystorm:web`)
 
@@ -583,8 +584,8 @@ rules were first created).
 | `style` | string | `info` | `info`, `success`, `warning`, `error` (accent color) |
 
 Toasts use Minecraft's toast system (top right, stacked with vanilla toasts, never overlapping). At most 5 wait in the
-element store, 3 are shown at once and up to 8 more wait in the toast queue. While the overlay or the trust dialog is
-open, Vystorm toasts are held back (so servers cannot cover the origin display or security warnings).
+element store, 3 are shown at once and up to 8 more wait in the toast queue. While the trust dialog is open, Vystorm
+toasts are held back (so servers cannot cover its security warnings).
 
 ### 5.9 Limits per connection
 
@@ -638,78 +639,37 @@ TOAST: `{"title":"Level 13","text":"+1 talent point","style":"success","icon":{"
 
 ---
 
-## 6. Web overlay – what your web pages must do
+## 6. Web pages – what your web pages must do
 
-Applies to Core modules and to your own backend on path B. The overlay is Chromium (via the optional library
-**Rinku**) inside a locked-down "cage".
+Applies to Core modules and to your own backend on path B. Since mod 0.7.0 pages open in the **player's system
+browser** as a normal tab – there is no embedded browser any more (0.6.0 and older had an optional Chromium overlay).
 
 ### 6.1 Sign-in contract
 
-1. The client loads `<webBase>/login#<token>` (the token is only in the **fragment** – it never goes over the network,
-   into server logs or the Referer).
+1. The client opens `<webBase>/login#<token>` in the system browser (the token is only in the **fragment** – it never
+   goes over the network, into server logs or the Referer).
 2. Your `/login` page reads `location.hash`, removes it immediately (`history.replaceState`), exchanges the token for a
    session (e.g. `POST` → `HttpOnly; SameSite=Strict; Secure` cookie) and redirects to an app page **on the same
    origin**.
-3. The client considers sign-in complete as soon as the main frame is on any same-origin page whose path is not
-   `/login` or `/login/`. No completion within 20 s = failed.
-4. Treat the token like Core does: 256-bit random, single use, short TTL (Core: 60 s; client caps at 600 s), same
-   permission checks as any other login link. Sessions created from mod tokens should end when the player quits.
+3. Treat the token like Core does: 256-bit random, single use, short TTL (Core: 60 s; client caps at 600 s), same
+   permission checks as any other login link. Sessions created from mod tokens should end when the player quits (the
+   mod cannot delete cookies in the player's browser).
 
 URL map with Core: login `<webBase>/login#<token>`; module start page = where Core's login redirect lands
-(`/m/<id>/` for modules with own files, `/app/<id>` for the bundled web UI); SHOW page = `<webBase><page>`; image
-icons = `<webBase><path>` (public static files).
+(`/m/<id>/` for modules with own files, `/app/<id>` for the bundled web UI); image icons = `<webBase><path>` (public
+static files).
 
-### 6.2 What the cage allows
+### 6.2 Page design
 
-| Area | Rule |
-|---|---|
-| Navigation (incl. redirects) | same origin (scheme, host, port) or `about:blank`; anything else is cancelled. If the main frame still leaves the origin, the browser is closed and its cookies deleted. |
-| Subresources (fetch, XHR, img, script, css, fonts, workers, service workers) | same origin, `data:`, same-origin `blob:` only. **No CDNs, no external fonts, no analytics** – bundle everything. |
-| WebSockets / WebRTC | not filterable by the client; use same-origin only (Core's CSP `connect-src 'self'` enforces this for Core pages) |
-| Popups, new tabs, `window.open` | always blocked |
-| External protocols (`mailto:`, `steam:` …) | never passed to the OS |
-| Downloads, file dialogs | blocked |
-| `alert` / `confirm` / `prompt` / `beforeunload` | silently answered with "no" – use in-page UI |
-| Camera, microphone, location, notifications, clipboard permission prompts | denied |
-| Certificate errors | never bypassed – use a valid certificate |
-| HTTP auth dialogs | cancelled |
-| Context menu, DevTools | none |
-| Storage | own in-memory context per connection: cookies, localStorage, IndexedDB, cache and service workers are separate from other mods and are wiped on disconnect / origin change / idle close |
+The page is an ordinary browser tab: normal browser security (same-origin policy, certificate checks, popup blocker)
+applies, and so does your own CSP (Core: `default-src 'self'` …). Use a valid certificate; with `http` the player gets
+a warning in the trust dialog. There are no in-game restrictions on size, input or zoom.
 
-Design tips: the page area is the whole screen below a 12 px top bar (which shows the origin). A transparent page
-background shows the game (dimmed). Zoom follows the GUI scale (`guiScale / 2 × pageZoom`, clamped 0.5–3). Esc always
-closes the overlay – do not rely on Esc inside the page. The page gets keyboard and mouse input while open.
+### 6.3 JS bridge (removed in 0.7.0)
 
-### 6.3 JS bridge (`window.vystormQuery`, optional)
-
-Only in the embedded browser, only in the main frame, only on the pinned origin, ≤ 20 requests/s, request ≤ 512
-characters, strict JSON with `"v": 1`. In a normal browser the function does not exist – pages must work without it.
-
-```js
-function vq(op, extra = {}) {
-  return new Promise((resolve, reject) => {
-    if (!window.vystormQuery) return reject(new Error('not in game'));
-    window.vystormQuery({
-      request: JSON.stringify({ v: 1, op, ...extra }),
-      onSuccess: r => resolve(JSON.parse(r)),
-      onFailure: (code, msg) => reject(new Error(code + ' ' + msg)),
-    });
-  });
-}
-const inGame = await vq('hello').then(() => true, () => false);
-```
-
-| `op` | Effect | Success response |
-|---|---|---|
-| `hello` | – | `{"v":1,"client":"vystorm-client","version":"0.6.0","protocol":2}` |
-| `close` | closes the overlay | `{"ok":true}` |
-| `sound` + `"id"` | UI sound; `id` ∈ `click`, `success`, `error`, `levelup`, `page` | `{"ok":true}` |
-| `reauth` | session expired (HTTP 401): the client fetches a new token over the game channel and signs in again (≤ 1 per 30 s) | `{"ok":true}` |
-
-Errors (`onFailure(code, message)`): `400 bad request` (bad JSON, unknown op/version, sound not allowed),
-`403 denied` (subframe, foreign origin, persistent query), `429 rate limited`. There are deliberately **no** game
-actions, commands, chat or client data in the bridge. Note: `window.vystormQuery` may also exist (without answering)
-in browsers of other mods that use the same library.
+Mods up to 0.6.0 offered `window.vystormQuery` (`hello`, `close`, `sound`, `reauth`) inside their overlay. It does not
+exist in a normal browser, so pages always had to work without it. Calls like `window.vystormQuery?.(…)` simply do
+nothing now.
 
 ---
 
@@ -718,23 +678,23 @@ in browsers of other mods that use the same library.
 - **Origin pinning:** the web origin comes only from the first WELCOME of the connection – never from chat, commands,
   pages or configuration.
 - **Trust on first use, per Minecraft server address:** before anything is loaded the player sees
-  "Allow this server's web pages in game?" with the server address and the web origin, and must click **Allow**
-  (buttons react after 1 s). The dialog only opens when the **player** presses the overlay key. The decision is stored
+  "Open this server's web pages?" with the server address and the web origin, and must click **Allow**
+  (buttons react after 1 s). The dialog only opens when the **player** presses the web key. The decision is stored
   in `config/vystorm_client/trust.json` (key = server address, port 25565 added). If a known server later sends a
   **different origin**, the player gets a warning and is asked again.
 - **Extra warnings in the dialog:** plain `http` to anything other than loopback/private IP literals (separate consent
   is stored); origins in the player's own computer/local network (loopback, private, CGNAT, link-local, `localhost`,
   `*.localhost`, `*.local`) when the Minecraft server itself is not there. `http` needs no extra consent only for
   `localhost`, `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `[::1]` and `[fd…]` literals.
-- **Without consent** nothing is loaded and no token is used, also on server initiative (tokens from server-initiated
-  OPEN are discarded). The trust bit in CLIENT_STATE is only a hint for the server; a faked bit only makes the server
-  send a SHOW that the real client ignores.
-- **The overlay's top bar always shows the origin** (`https://host` green, `http://host` yellow).
+- **Without consent** nothing is opened and no token is used. Server-initiated SHOW/OPEN never open the browser (mod
+  0.7.0 discards such tokens). The trust bit in CLIENT_STATE is only a hint for the server (0.7.0 never sets it); a
+  faked bit only makes the server send a SHOW that the real client does not follow.
+- **The browser's address bar shows the origin** the player allowed.
 - **Tokens:** exactly one use, memory only, never in logs, chat, crash reports, config or screenshots.
-- **What the mod tells the server:** mod version, loader and capabilities (HELLO), the state bits (hidden HUD,
-  overlay open, origin trusted), CLOSED events, REJECTs for invalid elements. Nothing else – no other mods, no files,
-  no system data. Image icons are fetched from the pinned origin with the user agent `VystormClient/<version>` and
-  without cookies.
+- **What the mod tells the server:** mod version, loader and capabilities (HELLO), the state bits (hidden HUD; up to
+  0.6.0 also overlay open and origin trusted), OPEN_REQUESTs on key press, REJECTs for invalid elements. Nothing
+  else – no other mods, no files, no system data. Image icons are fetched from the pinned origin with the user agent
+  `VystormClient/<version>` and without cookies.
 - **Server obligations:** never derive authority from these messages; same checks for OPEN_REQUEST as for a login
   link (web on, permission, module exists, module permission); rate-limit per player (HELLO once per connection,
   OPEN_REQUEST ≤ 10/min burst 3, CLOSED/CLIENT_STATE ≤ 2/s, REJECT ≤ 5/s); strict decoding (≤ 1 KiB, right direction,
@@ -745,8 +705,8 @@ in browsers of other mods that use the same library.
 
 ## 8. Path B – raw plugin messages without Core
 
-Use this only if you cannot use Vystorm Core. You implement the handshake, validation, rate limits and (for the
-overlay) a web backend yourself.
+Use this only if you cannot use Vystorm Core. You implement the handshake, validation, rate limits and (for web
+pages) a web backend yourself.
 
 ### 8.1 Minimal codec (Java)
 
@@ -859,15 +819,16 @@ Any platform works that (1) announces `vystorm:web` and `vystorm:ui` to the clie
 (2) can send and receive raw custom payload bytes on those channels during the play phase, and (3) follows the rules
 above. On Fabric/NeoForge servers register both channels as raw byte payloads (the whole payload is the message).
 
-### 8.4 Adding the web overlay on path B
+### 8.4 Adding web pages on path B
 
-1. WELCOME with `webBase = "https://your.web.host"` and `serverFlags = SERVER_OVERLAY | SERVER_UI` (3), and a
-   `hotkeyModule` your backend understands (`[a-z0-9-]{1,32}` or `""`).
+1. WELCOME with `webBase = "https://your.web.host"` and `serverFlags = SERVER_UI` (2; add `SERVER_OVERLAY` for mods
+   with an in-game display), and a `hotkeyModule` your backend understands (`[a-z0-9-]{1,32}` or `""`).
 2. On OPEN_REQUEST: check rate limits and permissions exactly like your normal web login, create a one-time token
    (43 chars base64url, 256-bit random, TTL ≤ 600 s), answer `OPEN(requestId, module, token, ttl, title)` – `module`
    must equal the request's module – or `DENIED(requestId, reason, message)`.
-3. Implement the sign-in contract (§6.1) and serve everything from that one origin (§6.2).
-4. SHOW only when `ORIGIN_TRUSTED` is set (protocol 2), rate-limit it (0.5/s), and fall back to your normal menu.
+3. Implement the sign-in contract (§6.1).
+4. SHOW only when `BROWSER_OVERLAY` was announced and `ORIGIN_TRUSTED` is set (protocol 2), rate-limit it (0.5/s), and
+   fall back to your normal menu – mod 0.7.0 never qualifies.
 5. End sessions created from mod tokens when the player quits.
 
 ---
@@ -892,15 +853,14 @@ above. On Fabric/NeoForge servers register both channels as raw byte payloads (t
 | HELLO arrives, nothing shows | WELCOME not sent or wrong version; `SERVER_UI` missing; message > 32 KiB; player pressed H (`UI_HIDDEN`); element anchored off-screen; REJECTs |
 | Key K says "This server does not support Vystorm Client" | No WELCOME in this connection |
 | Key K says "This server has no web interface enabled" | WELCOME with empty or invalid `webBase` (the client log names the reason for an invalid one) |
-| "The server wants to show a page – press K" | SHOW/OPEN while the player has not allowed the origin, or while another screen was open |
-| Overlay stuck on "Signing in …" / "Sign-in failed" | `/login` does not redirect away from `/login` within 20 s; token rejected; page not reachable |
-| "Page not reachable (error N)" | Chromium load error (DNS, TLS certificate, connection refused) |
-| "Interface closed for security reasons" | Main frame left the origin, render process died or another mod replaced the browser guard |
+| "The server wants to show a page – press K" | SHOW/OPEN from the server (mod 0.7.0 never opens pages on server request) |
+| Browser opens, but sign-in fails | Token rejected or expired (TTL), `/login` does not handle the fragment, page not reachable or certificate invalid |
+| "Opening web pages is turned off" | The player set `externalBrowserFallback: false` |
 | Image icon missing | Origin not allowed yet; not `200` + `image/png`; > 64 KiB or > 128 px; redirect; > 64 images |
-| Overlay never offered, only system browser | Player has no Rinku (`BROWSER_OVERLAY` missing) or Core `web.client.overlay: false` |
+| `show` always `false`, menu instead of page | Expected with mod 0.7.0 (no `BROWSER_OVERLAY`); players press K for the web interface |
 
 Protocol violations on `vystorm:web` are dropped silently (after 20 the protocol is off for the connection). DENIED
-messages are shown as a toast (not for hidden preload requests).
+messages are shown as a toast.
 
 ## 10. Player settings that affect your integration
 
@@ -909,25 +869,23 @@ messages are shown as a toast (not for hidden preload requests).
 | Key | Default | Effect for servers |
 |---|---|---|
 | `hudVisible` | `true` | `false` = native elements and tooltip lines hidden (key H; reported as `UI_HIDDEN`) |
-| `preloadBrowser` | `true` | hidden sign-in right after join (only for already trusted origins) |
-| `browserFps` | `60` | overlay frame rate (10..120) |
-| `keepWarmMinutes` | `30` | close the idle hidden browser after N minutes (0 = never, max 1440) |
-| `allowServerOpen` | `true` | `false` = SHOW and server-initiated OPEN are ignored (no trust bit either) |
-| `externalBrowserFallback` | `true` | without embedded browser, open pages in the system browser |
-| `pageZoom` | `1.0` | page zoom factor (0.5..2.0) |
-| `hardenRinku` | `true` | keep the browser library's same-origin policy on and its disk cache off; `false` locks the overlay if the library runs insecurely |
+| `allowServerOpen` | `true` | `false` = SHOW and server-initiated OPEN are ignored (otherwise they only show a "press K" hint) |
+| `externalBrowserFallback` | `true` | open pages in the system browser (historic name); `false` = the web key opens nothing |
 | `perfLog` | `false` | timing log every 5 s |
+
+Keys of 0.6.0 and older (`preloadBrowser`, `browserFps`, `keepWarmMinutes`, `pageZoom`, `hardenRinku`) are ignored.
 
 `trust.json` holds the per-server consents (delete to reset); `binds.json` holds the player's own command keys (the
 server can neither read nor trigger them).
 
-Keys (changeable under Controls → Vystorm): **K** open the server's web interface, **H** show/hide server HUD
-elements, **J** command keys menu. **Esc** closes the overlay.
+Keys (changeable under Controls → Vystorm): **K** open the server's web interface in your browser, **H** show/hide
+server HUD elements, **J** command keys menu.
 
 ## 11. Versions and compatibility
 
 | Mod | Protocol (HELLO) | Notes |
 |---|---|---|
+| 0.7.0 | 1..2 | no embedded browser: pages open in the system browser on key press; never sets `BROWSER_OVERLAY`, `JS_BRIDGE`, `OVERLAY_OPEN`, `ORIGIN_TRUSTED`; OPEN_REQUEST only with `target = 1` |
 | 0.6.0 | 1..2 | public release; DENIED for hidden preload is silent |
 | 0.5.0 | 1..2 | command keys (client-only feature) |
 | 0.4.0 | 1..2 | protocol 2: `ORIGIN_TRUSTED`; toasts via Minecraft's toast manager |
@@ -940,8 +898,8 @@ elements, **J** command keys menu. **Esc** closes the overlay.
 | 0.21.0 | protocol 2, `STATE_ORIGIN_TRUSTED`, `originTrusted` (capability `web-client-trust`) |
 | 0.23.0 | first public release of Core (recommended minimum) |
 
-Runtime: Minecraft 26.2, Fabric Loader ≥ 0.19.5, Fabric API ≥ 0.161.0+26.2, Java 25; optional Rinku ≥ 3.0.4 for the
-embedded browser (without it, native elements work and pages open in the system browser).
+Runtime: Minecraft 26.2, Fabric Loader ≥ 0.19.5, Fabric API ≥ 0.161.0+26.2, Java 25. Nothing else (0.6.0 and older
+could use the optional Rinku mod for an embedded browser).
 
 ## 12. Checklist
 
@@ -950,7 +908,7 @@ embedded browser (without it, native elements work and pages open in the system 
 - [ ] Element IDs are namespaced (`<plugin>:<name>`, ≤ 64 chars) and validated; you clean up with `CLEAR "<plugin>:"`.
 - [ ] PATCHes coalesced per tick; bars/cooldowns ≤ 4×/s; a failed PATCH (unknown ID) falls back to PUT.
 - [ ] `show(...)` only as an alternative to a menu, and the menu opens when it returns `false`.
-- [ ] Web pages are same-origin only, work without the JS bridge, and survive Esc/close at any time.
+- [ ] Web pages work in a normal browser tab and implement the sign-in contract (§6.1).
 - [ ] `webBase` is `https`, has a valid certificate and no path.
 - [ ] Tokens are single-use, short-lived, permission-checked and never logged.
 - [ ] REJECTs are logged (rate-limited) during development.
