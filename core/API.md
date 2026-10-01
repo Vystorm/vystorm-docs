@@ -1,4 +1,4 @@
-# Vystorm Core 0.24.0 – Plugin API Reference
+# Vystorm Core 0.25.0 – Plugin API Reference
 
 A self-contained reference for building Paper/Purpur plugins on top of **Vystorm Core** – written for humans and for AI
 coding assistants ("vibe coding"). With this file and the Core jar on the compile classpath you should be able to write
@@ -30,10 +30,11 @@ a working plugin without reading Core's source.
 15. [Client mod: overlay and native HUD elements](#15-client-mod-overlay-and-native-hud-elements)
 16. [Items, regions, curves, NBT and legacy handlers](#16-items-regions-curves-nbt-and-legacy-handlers)
 17. [Cross-plugin services](#17-cross-plugin-services)
-18. [Not public API](#18-not-public-api)
-19. [Rules for AI assistants](#19-rules-for-ai-assistants)
-20. [Versioning and compatibility](#20-versioning-and-compatibility)
-21. [Appendix: Core commands and permissions](#21-appendix-core-commands-and-permissions)
+18. [Native panels](#18-native-panels-vystormvystorm_corepanel)
+19. [Not public API](#19-not-public-api)
+20. [Rules for AI assistants](#20-rules-for-ai-assistants)
+21. [Versioning and compatibility](#21-versioning-and-compatibility)
+22. [Appendix: Core commands and permissions](#22-appendix-core-commands-and-permissions)
 
 ---
 
@@ -177,6 +178,7 @@ Capability names are strings in `CoreApi.Capability` (use the constants, e.g. `C
 | `WEB_LOCALIZATION` | `web-localization` | 0.23.0 | `WebContext.language()`, `/core/i18n`, `{{…}}` tokens, `Lang.ref` in web titles/errors |
 | `WEB_OPEN` | `web-open` | 0.24.0 | `WebServices.openOrLink/openOrElse/overlayPage/broadcast`, bundled web UI |
 | `WEB_SETTINGS` | `web-settings` | 0.24.0 | Web page `/app/settings`, `SettingsInterface.changed(player)` |
+| `PANELS` | `panels` | 0.25.0 | `panel.Panels`/`PanelSpec`/`Ui`: native panels of the client mod (§18), panel events, `GuiInteface.menuEntries` |
 
 **The guard pattern.** `CoreApi` itself exists since 0.11.0. On an older Core, touching it throws a `LinkageError`
 (`NoClassDefFoundError`), so wrap the first check:
@@ -572,7 +574,8 @@ titles/descriptions, `WebException` messages. Core resolves them per viewer. For
 
 Capability `settings` (0.7.0), web page `web-settings` (0.24.0). Plugins register **sections**; Core renders them as
 native dialogs (`/vsettings`, `/einstellungen`, main menu, pause menu) and – since 0.24.0 – on the web page
-`/app/settings`. Values stay in your storage: you supply getter and setter.
+`/app/settings`. Values stay in your storage: you supply getter and setter. With the client mod (0.8.0+) the same
+sections appear as a native panel (`/vsettings`), saved through `SettingsRegistry.save(…, "panel")` (§18.9).
 
 ### 5.1 `SettingsInterface`
 
@@ -686,8 +689,12 @@ boolean openMenu(Player player, String key)            // "plugin:key"; re-check
 boolean hasVisibleMenus(Player player, String group)
 void openDirectory(Player player, int page) / openDirectory(Player player, int page, String group)
 List<String> menuKeys(Player player)
+List<MenuEntryView> menuEntries(Player player, String group)   // 0.25.0: visible entries of a group (key, title, icon, group, description)
 void unregisterMenus(Plugin owner)                     // automatic on disable
 ```
+
+With the client mod (0.8.0+) `/vmenu` and key K show the main menu as a native panel grid (§18.9); entries registered
+through `PanelSpec.menu(...)` open natively, all others call their `opener` as before.
 
 - Entry id = `NamespacedKey(owner, key)` → `<lowercase plugin name>:<key>`; `key` must be a valid `NamespacedKey` key
   (`[a-z0-9/._-]`). Duplicate → `IllegalArgumentException`.
@@ -1036,7 +1043,8 @@ while the platform is off they are simply not served (`WebServices.available()` 
 150 chars max; invalid → `IllegalArgumentException`. The chat link always opens the module page (sub-path only in the
 overlay).
 
-Players can also open any module themselves with `/web <id>`.
+Players can also open any module themselves with `/web <id>` (plain `/web`: the overview). Since 0.25.3 this behaves like
+`openOrLink`: client mod present and origin trusted → the page opens directly, otherwise the chat link.
 
 ### 14.3 `WebModule`
 
@@ -2515,7 +2523,229 @@ ai.timer(20L, 20L, this::tickDirectors);
 
 ---
 
-## 18. Not public API
+## 18. Native panels (`Vystorm.vystorm_core.panel`)
+
+Capability `panels` (since **0.25.1** – the element builders were reshaped before the API freeze, plugins need 0.25.1).
+A **panel** is a menu you describe as a function of state; players with the Vystorm Client mod (0.8.0+, best 0.8.1)
+see it as a real Minecraft screen (scrolling, tooltips, keyboard, item icons), everybody else gets your own menu, an
+automatic Paper dialog or a web link. Panels work without the web platform (`web.enabled: false`), only
+`web.client.enabled` and `web.client.panels.enabled` must be on. `register`, `unregister` and `open` run on the server
+thread (otherwise `IllegalStateException`); `refresh`, `refreshAll`, `close` and `available` may be called from any
+thread (Core hops to the server thread). Render functions and handlers always run on the server thread.
+
+### 18.1 Overview and fallback chain
+
+`Panels.open(player, name)` walks this chain and returns where the player ended up (`PanelOpenResult`):
+
+| Player | Result |
+|---|---|
+| no permission (`access` predicate false) | `NONE` + message `panel.no-permission` |
+| mod with panels (handshake done) | `NATIVE` – the panel opens as a screen |
+| otherwise, `fallback(...)` set | `FALLBACK` – your own chest/dialog menu (it has priority) |
+| otherwise, `dialogFallback(true)` and the panel is dialog-capable | `DIALOG` – automatic Paper dialog built from the same panel |
+| otherwise, `web(module, page)` set | `WEB` – `WebServices.openOrLink` (system browser via the mod, else chat link) |
+| otherwise | `NONE` + message `panel.unavailable` |
+
+Dialog-capable: `heading`/`text`/`kv` → plain message, `item` → item body, `toggle` → bool input, `slider`/`number` →
+number range, `select` → single option, `input` → text, `button` → dialog buttons (paged like `/vmenu`; a button with
+`confirm(...)` first opens a confirmation dialog), `tabs` → buttons that reopen the dialog on another tab (each tabs
+element keeps its own choice; a `lazyTab` calls your `onTab` handler), `table`/`list` → at most 20 rows as text (more
+only with `web(...)` set, plus "Open web page"). Disabled inputs are shown as "label: value" text, disabled buttons
+are left out. Not dialog-capable: `image`, `chart`, `graph`, bigger tables without a web page. Dialog actions run
+through the same checks, rate limits and handlers as native actions; dialogs only refresh after an action.
+
+### 18.2 `Panels`
+
+| Method | Description |
+| --- | --- |
+| `static Panels of(Plugin plugin)` | Facade for your plugin; namespace `<lowercase plugin name>:`. |
+| `static boolean enabled()` | Panel channel is running. |
+| `String namespace()` / `String id(String name)` | `"myplugin"` / `"myplugin:<name>"`. |
+| `void register(String name, PanelSpec spec)` | Panel ID `<namespace>:<name>`; duplicate → `IllegalArgumentException`. |
+| `void unregister(String name)` | Remove one panel and its `/vmenu` entry from `menu(...)` (all of them are removed automatically on disable). |
+| `PanelOpenResult open(Player, String name)` / `open(Player, String name, String arg)` | Fallback chain (§18.1); `arg` reaches `ctx.arg()`. |
+| `void refresh(Player, String name)` | Re-render this player's open panel; Core diffs and sends a PATCH (coalesced per tick, ≤ 10/s). Any thread. |
+| `void refreshAll(String name)` | Same for every player who has it open. Any thread. |
+| `void close(Player, String name)` | Close it for this player. Any thread. |
+| `boolean available(Player)` | The player's mod finished the panel handshake. Any thread. |
+| `static void release(Plugin owner)` | Internal cleanup (called by Core on disable). |
+
+### 18.3 `PanelSpec.Builder`
+
+```java
+PanelSpec.builder(String title)                         // title for logs and the menu entry; may be lang.ref(...)
+    .access(Predicate<Player> access)                   // checked on open AND on every action (default: everyone)
+    .render(Function<PanelContext, Panel> render)       // required: build the panel from current state
+    .menu(MenuCategory category, Material icon, String description)   // also list it in /vmenu
+    .web(String moduleId, String subPath)               // "Open web page" button + WEB fallback
+    .dialogFallback(boolean on)                         // automatic Paper dialog for players without the mod
+    .fallback(Consumer<Player> fallback)                // your own chest/dialog menu (priority over dialog and web)
+    .build();
+```
+
+### 18.4 `Panel` and `Ui`
+
+`Panel.page(Object title)` → `.subtitle(Object)`, `.icon(Ui.Icon)`, `.size(Panel.Size.SMALL|MEDIUM|LARGE|FULL)`,
+`.theme(Panel.Theme.VYSTORM|VANILLA)`, `.accent(String color)`, `.children(Ui.Element<?>...)`, `.child(...)`,
+`.footer(Ui.Button...)`. Texts (`Object`) may be a `String`, a `lang.ref(...)` reference or an Adventure `Component`;
+Core renders them per viewer language and reduces them to the client's text format (colors and decorations; click,
+hover and insertion are dropped; > 64 segments or > 2048 characters are shortened server-side and logged once).
+
+Common setters on every element: `id(String)`, `tooltip(Object...)`, `visible(boolean)`, `disabled(boolean)`,
+`width(int px)`, `widthPercent(int)`, `fill()`, `grow(int)`, `minWidth(int)`, `maxWidth(int)`, `align(Ui.Align)`;
+containers also `children(...)`, `child(...)`.
+
+| Factory | Element | Setters / handler |
+| --- | --- | --- |
+| `Ui.section(Object title)` | card/group | `variant(Ui.Variant)`, `collapsible(boolean collapsed)` |
+| `Ui.row()`, `Ui.col()` | flex row/column (`Ui.Box`) | `gap`, `pad`, `justify(Ui.Justify.START|CENTER|END|BETWEEN)`, `wrap()`, `scrollY(int maxHeight)` |
+| `Ui.grid(int columns)`, `Ui.gridCells(int minWidth)` | grid | `gap` |
+| `Ui.tabs(String id)` | tabs | `tab(id, label, children...)`, `lazyTab(id, label)`, `select(tabId)`, `onTab(Change<String>)` |
+| `Ui.heading(Object)` | `Ui.Heading` | `level(1..3)` |
+| `Ui.text(Object)`, `Ui.lines(Object...)` | `Ui.Text` | `style(Ui.TextStyle)`, `maxLines(int)`, `nowrap()` |
+| `Ui.kv()` | key/value list | `row(key, value)`, `keyWidth(int)` |
+| `Ui.table(String id)` | table | `column(id, label)` + (for that last column) `sortable()`, `alignEnd()`, `alignCenter()`, `columnWidth(int px)`, `columnWidthPercent(int)`; `width(int)` is the width of the whole table like on every element; `row(Ui.row(key))`, `rows(list, mapper)`, `empty(Object)`, `sort(column, desc)`, `rowLines(int)`, `paging(page, pages, Change<Integer> onPage, Change<Ui.Sort> onSort)`, `onSelect(Change<String>)` |
+| `Ui.row(String key)` | table row | `cell(Object)` (text, `Ui.cell(text).sort(number)`, or an element), `tooltip(...)` |
+| `Ui.buttons(Element<?>...)` | several elements in one cell | – |
+| `Ui.list(String id)` | list | `item(Ui.listItem(key, title))`, `items(list, mapper)`, `empty(Object)`, `onSelect(Change<String>)`; item: `subtitle`, `right`, `badge`, `icon`, `tooltip` |
+| `Ui.button(String id)` | button | `label`, `icon`, `primary()`, `danger()`, `ghost()`, `confirm(title, text)`, exactly one of `onClick(Click)`, `navigate(panelName, arg)`, `web(module, page)` |
+| `Ui.toggle(id, label)` | switch | `description`, `value(boolean)`, `onChange(Change<Boolean>)` |
+| `Ui.slider(id, label)` | `Ui.Slider` | `range(min, max, step)`, `value(double)`, `format("{v} blocks")`, `decimals(int)`, `live()`, `onChange(Change<Double>)` |
+| `Ui.number(id, label)` | `Ui.NumberField` (−/+ field) | `range(min, max, step)`, `value(double)`, `decimals(int)`, `onChange(Change<Double>)` |
+| `Ui.input(id, label)` | text field | `value`, `placeholder`, `maxLength(≤ 256)`, `chars(Ui.Chars.ANY|NAME|INTEGER|DECIMAL)`, `submitOnEnter()`, `onChange(Change<String>)`, `search(Change<String>)` |
+| `Ui.select(id, label)` | choice | `option(id, label[, icon])`, `value(id)`, `segmented()`, `searchable()`, `onChange(Change<String>)` |
+| `Ui.form(id, Object submit)` | form | children, `onSubmit(Change<Map<String,Object>>)` – inputs inside send nothing themselves; disabled or hidden fields are not part of the map |
+| `Ui.progress(value, max)` | `Ui.Progress` | `label`, `color`, `segments`, `height` |
+| `Ui.timer(remainingMs, totalMs)` | `Ui.Timer` (counts down on the client) | `format(Ui.TimerFormat)`, `bar()` |
+| `Ui.item(Material)`, `Ui.item(itemId, model)` | item icon (also usable as `Ui.Icon`) | `count`, `glint()`, `size(16/24/32)`, `slot()`, `rarity(String)`, `onClick(Click)` |
+| `Ui.sprite(sprite, w, h)`, `Ui.webImage(path, w, h)` | `Ui.Image` | `alt(Object)`, `smooth()` |
+| `Ui.badge(Object)` | `Ui.Badge` | `color` |
+| `Ui.swatch(color)`, `Ui.divider()`, `Ui.spacer(int)` | `Ui.Swatch`, `Ui.Divider`, `Ui.Spacer` | `size` (swatch, divider) |
+
+Each factory returns its own builder type that only offers the fields its element has (0.25.1; 0.25.0 had one
+catch-all `Ui.Simple`, so `heading(..).segments(5)` compiled and was silently ignored).
+
+### 18.5 Handlers, values and results
+
+- `Ui.Click` = `Result handle(PanelAction a)`; `Ui.Change<T>` = `Result handle(PanelAction a, T value)`.
+- Value types: toggle `Boolean`, slider/number `Double`, input/select/search/tab/select-row `String`, page `Integer`,
+  sort `Ui.Sort(column, descending)`, form `Map<String, Object>`. Core has already checked type, range, step, option,
+  length and character class against **what it sent** before your handler runs.
+- `PanelAction`: `player()`, `value()`, `session()` (`PanelSession`: `id()`, `get/put/remove` – server-side state per
+  open panel, e.g. a filter), `refresh()` (re-render after the handler; Core diffs and sends a PATCH).
+- `PanelContext` (render): `player()`, `arg()`, `text(key, placeholders...)` / `component(key, ...)` (your plugin's
+  language bundle in the viewer's language), `session()`.
+- Return `Result.ok()`, `Result.ok(message)` (toast), `Result.error(message)` (shown at the element, optimistic value
+  reset), `Result.fieldErrors(Map<elementId, text>)` (form fields). `Result.success()` tells whether it was ok.
+- Exceptions in handlers are caught and logged; the player gets `panel.failed`.
+
+### 18.6 Rules
+
+- Panel IDs `<namespace>:<name>`, element IDs `[a-z0-9][a-z0-9_.:/-]{0,63}`, unique per panel; interactive elements
+  need one. Core gives unnamed, non-interactive elements path IDs (`~2/0/5`). **Derive IDs from what the element
+  means** (a setting key, a menu key, a portal id), never from its position: a click that races a refresh is then
+  answered "stale" instead of hitting another element.
+- Table cell elements get the prefix `<tableId>/<rowKey>/<id>` (e.g. `list/p17/rm`); longer than 64 characters →
+  `IllegalArgumentException` while rendering. Keep row keys short.
+- **Objects live in closures, not in IDs.** The client only sends element IDs; a button's handler knows its portal/
+  node/amount because the lambda captured it. Still re-check business rules in the handler (money, ownership, combat,
+  permission at the time of the click).
+- `ctx.arg()` from `navigate(...)` or the hotkey comes back from the client – treat it as user input.
+- Every action is answered (`P_RESULT`) except an exact duplicate (same session and `seq`), which is dropped silently;
+  a click on an element that a refresh removed or disabled is answered "stale" and the handler does not run. Rate
+  limits: 20 actions/s (burst 40) per player – checked first; above it Core answers at most 2×/s – and 10/s per
+  element (only for elements that exist in the sent document). Panel requests from the client: 2/s (burst 6).
+- `Panels.open` of the same panel and argument twice within one tick renders and sends once.
+- Opening a panel on your own initiative replaces the visible one; the replaced session stays alive until the client
+  confirms (`P_CLOSED`). If the client refuses the new panel (player setting, limit), the old one keeps working.
+- Big documents (≥ 32 KiB) are validated, diffed, serialised and compressed off the server thread on refresh; until
+  that is done, actions are checked against the document the player still sees. A result for a panel that is no longer
+  the visible one is dropped and re-rendered when it becomes visible again (0.25.2). Your render function itself always
+  runs on the server thread.
+- If the client reports a gap (`resync:`), Core sends the full document once the session is visible, at most once per
+  second per session; patches over 128 KiB are sent as a full document (0.25.2).
+- Limits of the client schema: ≤ 4096 elements, depth ≤ 24, ≤ 2000 table rows, ≤ 16 columns/tabs, ≤ 256 options,
+  texts ≤ 64 segments / 2048 characters. Documents > 8 KiB are compressed and chunked automatically (≤ 8 chunks per tick).
+- When your plugin is disabled, its panels are unregistered, open sessions close (`P_CLOSE`) and handlers are released.
+
+### 18.7 Events (synchronous, server thread)
+
+| Event | When | Getters |
+| --- | --- | --- |
+| `VystormPanelOpenEvent` | a panel was sent to the client | `getPlayer()`, `panelId()`, `session()` |
+| `VystormPanelCloseEvent` | a panel closed | `panelId()`, `session()`, `reason()` (0 player, 1 replaced, 2 error, 3 server) |
+| `VystormPanelErrorEvent` | the client refused a panel or element | `owner()`, `panelId()`, `elementId()`, `code()` (1 invalid, 2 limit, 3 unsupported, 4 unknown id, 5 timeout, 6 transfer), `detail()` |
+
+### 18.8 Complete example
+
+```java
+public final class PortalPanels {
+    private final Panels panels;
+
+    PortalPanels(JavaPlugin plugin, PortalStore store) {
+        panels = Panels.of(plugin);
+        panels.register("mine", PanelSpec.builder("My portals")
+                .access(p -> p.hasPermission("betterportals.use"))
+                .menu(MenuCategory.WORLD, Material.OBSIDIAN, "Your portals")
+                .web("portals", "")
+                .fallback(player -> openChestMenu(player))          // existing chest menu keeps working
+                .render(ctx -> Panel.page("My portals").size(Panel.Size.LARGE).children(
+                        Ui.table("list")
+                                .column("name", "Name").sortable()
+                                .column("uses", "Uses").alignEnd().sortable()
+                                .column("act", "").columnWidth(48)
+                                .rows(store.byOwner(ctx.player().getUniqueId()), g -> Ui.row(g.id())
+                                        .cell(g.name())
+                                        .cell(Ui.cell(String.valueOf(g.uses())).sort(g.uses()))
+                                        .cell(Ui.buttons(
+                                                Ui.button("rename").icon(Ui.item(Material.NAME_TAG)).tooltip("Rename")
+                                                        .navigate("rename", g.id()),          // opens panel "rename" with arg
+                                                Ui.button("rm").icon(Ui.item(Material.BARRIER)).danger()
+                                                        .confirm("Remove portal?", g.name() + " will be deleted.")
+                                                        .onClick(a -> remove(store, a, g.id())))))
+                                .empty("You have no portals yet.")))
+                .build());
+    }
+
+    private Result remove(PortalStore store, PanelAction a, String id) {
+        PortalGroup g = store.get(id);
+        if (g == null || !g.owner().equals(a.player().getUniqueId())) return Result.error("Not your portal.");
+        store.remove(id);
+        a.refresh();                                   // Core diffs → PATCH "rows remove <id>"
+        return Result.ok("Removed " + g.name());
+    }
+
+    void open(Player player) { panels.open(player, "mine"); }
+}
+```
+
+### 18.9 Settings and `/vmenu` for free
+
+- **Settings:** `SettingsPanels` builds the panel `vystorm_core:settings` from the same sections as the dialogs and the
+  web page (toggle, slider/number, select, text input, search field, personal/server tab). It saves through
+  `SettingsRegistry.save(player, key, values, "panel")` – same validation, `afterSave` once, change listeners fire;
+  `settings().changed(player)` refreshes open panels. Element IDs are `s:<section key>/<setting id>` (a hash when that
+  does not fit the ID rules), so they stay put when sections come and go. `/vsettings [server|<plugin:section>]` and the settings menu
+  entry open it for players with the mod; no plugin has to do anything.
+- **Main menu:** `MenuPanels` builds `vystorm_core:menu` – a grid of item buttons per `MenuCategory` from
+  `GuiInteface.menuEntries(...)`. Entries whose key is itself a registered panel (e.g. via `PanelSpec.menu`) open
+  natively with a back stack; all others call your `opener` as before. Tile IDs are `m:<menu key>`. `/vmenu` without arguments and key **K** open
+  it; without the mod `/vmenu` shows the dialog directory as before.
+
+### 18.10 `config.yml` – `web.client.panels`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Register `vystorm:panel`; WELCOME announces `SERVER_PANELS`. |
+| `hotkey-panel` | `""` | Panel the K key opens; `""` = `vystorm_core:menu`. Shift+K still opens the web page. |
+| `refresh-per-second` | `10` | Re-renders per open panel at most (`refresh()` calls are coalesced per tick). |
+| `chunks-per-tick` | `8` | Transfer chunks (≤ 30 KiB) per player and tick. |
+| `actions-per-second` / `action-burst` | `20` / `40` | Actions per player (each element at most 10/s). |
+
+`GuiInteface.unregisterMenu(Plugin owner, String key)` (0.25.1, default `false`) removes a single `/vmenu` entry;
+`Panels.unregister` uses it for `menu(...)` entries.
+
+## 19. Not public API
 
 These are `public` in the jar for technical reasons but are **not** part of the plugin API. They may change without
 notice; don't call or implement them.
@@ -2541,7 +2771,7 @@ Further internal members of the item, mob, region and pack APIs are marked in se
 
 ---
 
-## 19. Rules for AI assistants
+## 20. Rules for AI assistants
 
 Follow these when generating code against Vystorm Core.
 
@@ -2586,7 +2816,7 @@ unusable (Core logs it and falls back to English/jar texts).
 
 ---
 
-## 20. Versioning and compatibility
+## 21. Versioning and compatibility
 
 - **Additive only.** Public types and members are never removed or renamed and signatures never change. New methods on
   existing interfaces always get a `default` body. Core's build enforces this with `ApiCompatibilityTest` against a
@@ -2602,13 +2832,13 @@ unusable (Core logs it and falls back to English/jar texts).
 
 ---
 
-## 21. Appendix: Core commands and permissions
+## 22. Appendix: Core commands and permissions
 
 | Command | Aliases | Purpose | Permission |
 | --- | --- | --- | --- |
 | `/menu [list\|settings\|<plugin:key>]` | `/vmenu`, `/vm`, `/m` | Main menu, menu entries | entry `access` predicates |
 | `/einstellungen [server\|<plugin:section>]` | `/vsettings`, `/vystormsettings` | Settings dialogs | section permissions |
-| `/web [module\|logout\|status]` | – | One-time web login link, logout, status (admin) | `vystorm.web.use` (default: everyone) |
+| `/web [module\|logout\|status]` | – | Open a web page (directly with the client mod, else a one-time login link), logout, status (admin) | `vystorm.web.use` (default: everyone) |
 | `/vadmin [list\|status\|<module>\|language [reload]]` | `/admin`, `/ad` | Admin dashboard | `vystorm_core.admin` (default: op) |
 | `/vregion at [player] \| list [kind]` | – | Region register | `vystorm_core.admin` |
 | `/nbt <key> <value>` | – | Set a Core item tag on the held item | `vystorm_core.admin` |
