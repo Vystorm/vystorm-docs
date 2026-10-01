@@ -6,10 +6,10 @@ without seeing the mod's source code. All names, types and limits below are take
 
 | | |
 |---|---|
-| Mod | Vystorm Client **0.7.0** (Fabric, Minecraft **26.2**, Java 25), client-side only, no other mods needed besides Fabric API |
+| Mod | Vystorm Client **0.8.0** (Fabric, Minecraft **26.2**, Java 25), client-side only, no other mods needed besides Fabric API |
 | Protocol | version **2** (the mod accepts servers speaking version 1 or 2) |
-| Channels | `vystorm:web` (handshake, web pages) and `vystorm:ui` (native elements) |
-| Server reference implementation | **Vystorm Core** (Paper/Purpur 26.2 plugin), 0.21.0 or newer for protocol 2 |
+| Channels | `vystorm:web` (handshake, web pages), `vystorm:ui` (native elements) and `vystorm:panel` (native menus, mod 0.8.0+) |
+| Server reference implementation | **Vystorm Core** (Paper/Purpur 26.2 plugin), 0.21.0 or newer for protocol 2, 0.25.0 or newer for panels |
 | License | MIT |
 
 ---
@@ -24,10 +24,11 @@ without seeing the mod's source code. All names, types and limits below are take
 6. [Web pages – what your web pages must do](#6-web-pages--what-your-web-pages-must-do)
 7. [Trust and security model](#7-trust-and-security-model)
 8. [Path B – raw plugin messages without Core](#8-path-b--raw-plugin-messages-without-core)
-9. [Errors, rejections and troubleshooting](#9-errors-rejections-and-troubleshooting)
-10. [Player settings that affect your integration](#10-player-settings-that-affect-your-integration)
-11. [Versions and compatibility](#11-versions-and-compatibility)
-12. [Checklist](#12-checklist)
+9. [Native panels (`vystorm:panel`)](#9-native-panels-vystormpanel)
+10. [Errors, rejections and troubleshooting](#10-errors-rejections-and-troubleshooting)
+11. [Player settings that affect your integration](#11-player-settings-that-affect-your-integration)
+12. [Versions and compatibility](#12-versions-and-compatibility)
+13. [Checklist](#13-checklist)
 
 ---
 
@@ -55,6 +56,7 @@ without seeing the mod's source code. All names, types and limits below are take
 | Handshake, versioning, rate limits, batching | done by Core | you implement them |
 | Web pages (login tokens, sessions, CSRF) | Core's web platform (`web.enabled: true`) | you need your own web backend (see §6, §8.4) |
 | Native HUD elements | `ClientUi` + typed `ClientElement` builders | JSON over `vystorm:ui` |
+| Native menus (screens) | `panel.Panels` + `PanelSpec` + `Ui` (Core 0.25.0+) | JSON over `vystorm:panel` (§9) |
 | Validation | Core validates with the same schema as the client | you validate (or read REJECTs) |
 
 **Core is the supported path.** The raw protocol is documented here so that other server software can talk to the
@@ -95,7 +97,7 @@ off.
 | `web.client.enabled` | `true` | Register `vystorm:web` / `vystorm:ui`. `false` = the mod sees a vanilla server. |
 | `web.client.overlay` | `true` | WELCOME flag `SERVER_OVERLAY` (in-game display allowed). Mod 0.7.0 has no in-game display and always uses the system browser, so this has no visible effect for it. |
 | `web.client.preload` | `true` | Hidden sign-in right after joining. Only used by mods up to 0.6.0; 0.7.0 never asks. |
-| `web.client.hotkey-module` | `skills` | Module the web key (K) opens; `""` = overview. Ignored if the module is not registered. |
+| `web.client.hotkey-module` | `skills` | Module the web key (Shift+menu key, or the menu key without panels) opens; `""` = overview. Ignored if the module is not registered. |
 | `web.client.open-per-minute` | `10` | Token requests per minute and player (burst 3). |
 | `web.client.end-sessions-on-quit` | `client` | `client` / `all` / `none`: which web sessions end when the player quits. |
 | `web.client.ui.enabled` | `true` | Native elements channel (`vystorm:ui`). |
@@ -139,7 +141,7 @@ openChestMenu(player);                                                // everyon
 
 `show` does not grant anything: the mod then signs in with a one-time token that is checked exactly like `/web`, and
 every API call of the page is checked like in a normal browser. Players with mod 0.7.0 open the web interface
-themselves with **K** (in their browser, already signed in); `WebServices.openOrLink` gives them a chat link instead. Register the web module itself with
+themselves with the web key (Shift+menu key, in their browser, already signed in); `WebServices.openOrLink` gives them a chat link instead. Register the web module itself with
 `WebServices.register(plugin, WebModule.builder(id, title)…build())` (see Core's README, "Web platform").
 
 ### 3.4 `ClientUi` – native elements
@@ -339,7 +341,7 @@ never sets bits 1 and 2.
 - HELLO is sent **once per connection**.
 - CLIENT_STATE is sent right after WELCOME (also with `flags = 0`) and on every change (checked at most once per second
   when nothing visible changes).
-- Mod 0.7.0 sends OPEN_REQUEST only when the player presses the web key (K): for a waiting SHOW/OPEN module (§4.7) or
+- Mod 0.7.0 sends OPEN_REQUEST only when the player presses the web key (Shift+menu key; the menu key alone on servers without panels): for a waiting SHOW/OPEN module (§4.7) or
   for `hotkeyModule`, always with `target = 1`. (0.6.0 and older also sent it for preloading right after WELCOME and
   for the JS bridge op `reauth`.)
 
@@ -363,7 +365,7 @@ never sets bits 1 and 2.
 - **OPEN** with `requestId > 0` is only accepted if it matches an own pending request **with the same module**
   (pending ≤ 30 s, each ID once). `requestId = 0` (server-initiated) is only accepted with `SERVER_OVERLAY`, is
   rate-limited together with SHOW (0.5/s, burst 3) and is ignored if the player disabled server-opened pages. Mod 0.7.0
-  always discards its token unused and only shows the "press K" hint; older mods used it only for an allowed origin.
+  always discards its token unused and only shows the "press <menu key>" hint; older mods used it only for an allowed origin.
 - **title** is not shown by mod 0.7.0 (older mods showed it in the overlay's top bar).
 - **DENIED** is shown to the player as a toast (`message`, or a generic text). DENIED for a hidden preload request
   (mods up to 0.6.0) is silent.
@@ -386,7 +388,7 @@ Client                                   Server
   ◀──────────── vystorm:ui PUT … (HUD, markers, tooltip rules)
 ```
 
-**Web key (K)** – if a server SHOW or OPEN is waiting, the key opens that module; otherwise `hotkeyModule`. If the
+**Web key (Shift+menu key; the menu key alone without panels)** – if a server SHOW or OPEN is waiting, the key opens that module; otherwise `hotkeyModule`. If the
 origin is not trusted yet, the trust dialog opens (only on this key press). Then:
 ```
   ── OPEN_REQUEST(id, module, 1) ────────▶  same checks as a web login link
@@ -396,7 +398,7 @@ origin is not trusted yet, the trust dialog opens (only on this key press). Then
 Every key press fetches a fresh token; the mod keeps no session of its own.
 
 **Server SHOW / OPEN with `requestId 0`** – mod 0.7.0 never opens the browser on server initiative. It remembers the
-module, shows a toast "The server wants to show a page – press K" (at most 0.5/s, burst 3, only with `SERVER_OVERLAY`,
+module, shows a toast "The server wants to show a page – press <menu key>" (at most 0.5/s, burst 3, only with `SERVER_OVERLAY`,
 not if the player disabled server-opened pages) and discards any token from such an OPEN. Core only sends SHOW to
 clients that announce `BROWSER_OVERLAY` and report `ORIGIN_TRUSTED`, so it never sends one to 0.7.0.
 
@@ -833,7 +835,141 @@ above. On Fabric/NeoForge servers register both channels as raw byte payloads (t
 
 ---
 
-## 9. Errors, rejections and troubleshooting
+## 9. Native panels (`vystorm:panel`)
+
+Since mod **0.8.0** a server can describe a whole menu as JSON (a "panel") and the mod shows it as a real Minecraft
+screen: scrolling, hover tooltips, keyboard focus, real item icons, Vystorm or vanilla look. No browser, no download, no
+web login. Actions go back as plugin messages; **the server checks every single one** against what it sent. Panels work
+even when the web platform is off.
+
+### 9.1 Path A – Core API (Vystorm Core 0.25.1+, capability `panels`)
+
+```java
+Panels panels = Panels.of(plugin);                         // namespace "<plugin>:"
+panels.register("display", PanelSpec.builder("Display")
+        .access(p -> true)                                 // checked on open AND on every action
+        .dialogFallback(true)                              // players without the mod get an automatic Paper dialog
+        .render(ctx -> Panel.page("Display").size(Panel.Size.MEDIUM).children(
+            Ui.section("HUD").children(
+                Ui.toggle("hud", "Show HUD").value(prefs.hud(ctx.player()))
+                    .onChange((a, on) -> { prefs.setHud(a.player(), on); return Result.ok(); }),
+                Ui.slider("range", "Range").range(4, 64, 4).value(store.range(ctx.player())).format("{v} blocks")
+                    .onChange((a, v) -> v > store.maxRange() ? Result.error("Too far") : ok(store.setRange(a.player(), v.intValue()))))))
+        .build());
+
+panels.open(player, "display");                            // NATIVE / DIALOG / WEB / FALLBACK / NONE
+```
+
+A list with actions – the object behind a button lives in the handler's closure, the client only sends element IDs:
+
+```java
+panels.register("mine", PanelSpec.builder("My portals")
+        .access(p -> p.hasPermission("betterportals.use"))
+        .menu(MenuCategory.WORLD, Material.OBSIDIAN, "Your portals")   // entry in /vmenu
+        .web("portals", "")                                             // "Open in browser" + link fallback
+        .fallback(this::openChestMenu)                                  // your own chest menu has priority
+        .render(ctx -> Panel.page("My portals").size(Panel.Size.LARGE).children(
+            Ui.table("list")
+                .column("name", "Name").sortable()
+                .column("act", "").columnWidth(48)                          // width of the last column
+                .rows(store.byOwner(ctx.player().getUniqueId()), g -> Ui.row(g.id())
+                    .cell(g.name())
+                    .cell(Ui.button("rm").icon(Ui.item(Material.BARRIER)).danger()
+                        .confirm("Remove portal?", g.name() + " will be deleted.")
+                        .onClick(a -> remove(a, g.id()))))        // the ID is in the closure
+                .empty("You have no portals yet.")))
+        .build());
+```
+
+Handlers run on the server thread, return `Result.ok()`, `Result.ok(msg)`, `Result.error(msg)` or
+`Result.fieldErrors(map)`, and call `a.refresh()` to re-render: Core diffs the new tree against the old one by ID and
+sends a PATCH. Full reference: Core `docs/API.md` §18.
+
+### 9.2 Path B – raw messages
+
+Handshake (after the normal `vystorm:web` handshake):
+
+1. The client's HELLO has capability bit 7 `PANELS` (128); your WELCOME sets `serverFlags` bit 2 `SERVER_PANELS` (4)
+   and you register `vystorm:panel`.
+2. The client sends **P_HELLO** `0x20` (`schemaMin`, `schemaMax`, `features`, `cacheKiB`); you answer **P_WELCOME**
+   `0x30` (`schema = 1`, `features` = intersection, `hotkeyPanel` = panel ID the menu key opens, or empty to keep the menu key on the
+   web page).
+3. The client asks with **P_REQUEST** `0x21` (`requestId`, `panelId`, `arg`; empty `panelId` = your hotkey panel); you
+   answer **P_OPEN** `0x31` or **P_DENIED** `0x37`. You may also open on your own initiative (`requestId = 0`): while
+   one of your panels is open the client always follows; otherwise at most 0.5×/s, only with the player's
+   `allowServerOpen` and only when no other screen is open. **An OPEN the client does not show is answered with
+   P_CLOSED** (reason 0 refused, 1 another screen, 2 broken) – forget that session, keep the one it would have replaced.
+4. Clicks and changes arrive as **P_ACTION** `0x22` (`session`, `seq`, `elementId`, `kind`, `value` JSON); answer
+   **P_RESULT** `0x33` (`status` 0 ok, 1 error, 2 denied, 3 stale, 4 rate-limited; JSON `{"message":…,
+   "fields":{id:text}}`) – Core answers every action except an exact duplicate `seq` – and optionally **P_PATCH**
+   `0x32`. Patches of a session must have `rev` = previous + 1 (the first after an OPEN sets the count); on a gap the
+   client sends **P_ERROR** with `detail` starting `resync:` and ignores patches until you send a full OPEN (flag bit 2).
+   Bump `rev` on every full OPEN as Core ≥ 0.25.2 does, so a lost OPEN shows up as a gap; P_REQUEST is limited to 2/s
+   (burst 6) on both sides.
+5. **P_CLOSED** `0x23` / **P_CLOSE** `0x34` end sessions; **P_ERROR** `0x2F` reports documents or elements the client
+   refused (codes 1 invalid, 2 limit, 3 unsupported, 4 unknown id, 5 timeout, 6 transfer).
+
+Transfers: documents/patches with raw UTF-8 ≤ 8 KiB go inline; bigger ones as **P_BEGIN** `0x35` + **P_CHUNK** `0x36`
+(Deflate, chunks ≤ 30 KiB, index 0, 1, … without gaps, SHA-256 over the **raw** bytes, inflated size ≤ `rawBytes` and
+ratio ≤ 1:64, at most 2 at a time, 10 s timeout). The easiest way to get the binary format right is to use the classes
+in `protocol/src/main/java/at/esoren/vystorm/client/protocol/panel` (`PanelMessage`, `Transfer`, `PanelSchema`,
+`PanelPatch`, `ActionCheck`); they are plain Java (Gson only). Byte-exact field table: `PROTOCOL.md` §8.
+
+### 9.3 JSON schema v1 (short reference)
+
+Document: `{"schema":1, "panel":"<ns>:<name>", "root":{"type":"page", …}}`. Strict JSON, limits are rejected (never
+truncated), unknown fields are ignored. IDs `[a-z0-9][a-z0-9_.:/-]{0,63}`, required for everything interactive and
+everything you want to patch. Common fields: `id`, `tooltip` (≤ 8 texts), `visible`, `disabled`, `width` (`auto`,
+pixels, `"50%"`, `fill`), `minWidth`, `maxWidth`, `grow` (0..10), `align`. Texts are the `vystorm:ui` text format
+(§5.1) with ≤ 64 segments and ≤ 2048 characters.
+
+| Type | Purpose | Main fields | Action |
+|---|---|---|---|
+| `page` | root | `title`, `subtitle`, `icon`, `size` (`small`/`medium`/`large`/`full`), `theme`, `accent`, `web {module,page}`, `children`, `footer` | – |
+| `section` | card/group | `title`, `variant` (`card`,`plain`,`notice`,`warn`,`error`), `collapsible`, `collapsed`, `children` | – |
+| `row` / `col` | flex container | `gap`, `pad`, `justify`, `wrap` (row), `scroll` (`none`/`y`/`x`), `maxHeight`, `children` | – |
+| `grid` | grid | `columns` (1..12) or `cell` (min width 16..400), `gap`, `children` | – |
+| `tabs` | tabs | `tabs:[{id,label,icon,badge,children,lazy}]` (≤ 16), `selected` | TAB (lazy only) |
+| `heading`, `text` | text | `text`/`lines`, `level` 1..3, `style`, `maxLines`, `wrap` | – |
+| `kv` | key/value list | `rows:[{key,value,icon,tooltip}]` (≤ 64), `keyWidth` | – |
+| `table` | table | `columns` (≤ 16) `[{id,label,width,align,sortable}]`, `rows` (≤ 2000) `[{key,cells,tooltip}]`, `sort`, `rowLines`, `paging {page,pages}`, `select`, `empty` | SORT/PAGE (paging), SELECT |
+| `list` | list | `items:[{key,icon,title,subtitle,right,tooltip,badge}]` (≤ 2000), `select`, `empty` | SELECT |
+| `button` | button | `label`, `icon`, `style`, `confirm {title,text,yes,no}`, exactly one of `action:true`, `navigate {panel,arg}`, `web {module,page}` | CLICK |
+| `toggle` | switch | `label`, `description`, `value` | CHANGE |
+| `slider` / `number` | number | `label`, `min`, `max`, `step`, `value`, `format` (`{v}`), `decimals`, `live` | CHANGE |
+| `input` | text field | `label`, `value`, `placeholder`, `maxLength` ≤ 256, `chars` (`any`,`name`,`integer`,`decimal`), `submit`, `search` | CHANGE / SEARCH |
+| `select` | choice | `label`, `options` (≤ 256) `[{id,label,icon,tooltip}]`, `value`, `style` (`dropdown`/`segmented`), `search` | CHANGE |
+| `form` | groups inputs | `children`, `submit` (button text) | SUBMIT |
+| `progress`, `timer` | bar, countdown | `value`/`max`/`label`/`color`/`segments`; `remainingMs`/`totalMs`/`format`/`bar` | – |
+| `item`, `image` | item icon, image | `icon`, `count`, `size`, `slot`, `rarity`; `src {sprite\|image}`, `width`, `height` | CLICK (item, optional) |
+| `badge`, `swatch`, `divider`, `spacer` | small parts | `text`, `color`, `size` | – |
+| `chart`, `graph` | not in 0.8.0 | – | shown as "not supported" + P_ERROR 3 |
+
+Table cells: plain text, `{text,sort}`, or a `button`/`badge`/`item`/`row` element. Core prefixes cell elements with
+`<tableId>/<rowKey>/<id>`. Tables without `paging` are sorted on the client (no network).
+
+**Patches** `{"rev":n,"ops":[…]}`: `set` (merge top-level fields), `replace`, `insert` (`parent`,`index`,`element`),
+`remove` (`id`), `rows` (tables/lists: `upsert`, `remove`, `order` by key). The root can be addressed as `root`. The
+patched document is validated in full again. Patches, re-layouts and results never overwrite what the player has typed
+or set but not sent yet (text being edited, unsent number/slider changes, form values until SUBMIT).
+
+**Action values** (`P_ACTION.kind`): 1 CLICK `""`, 2 CHANGE `true`/number/`"text"`/`"optionId"`, 3 SUBMIT
+`{"<id>":value,…}` (disabled/hidden fields are not sent; Core ignores them), 4 SORT `{"column":"<id>","dir":"asc"|"desc"}`, 5 PAGE number, 6 TAB `"tabId"`, 7 SELECT
+`"rowKey"`, 9 SEARCH `"text"` (debounced 300 ms).
+
+### 9.4 Trust rules
+
+- The client never runs code from a panel: no scripts, no expressions, no commands, no click events in texts. The only
+  effects are P_ACTION, P_REQUEST (`navigate`), P_CLOSED and "Open in browser" (existing trust dialog, pinned origin).
+- **Check every action on the server** against the document you sent (Core does this with the same `ActionCheck`
+  class): element exists, is interactive, visible, not disabled, `kind` fits, value within the limits you sent, only
+  known form fields, `seq` not seen before; rate limits (Core: 20/s, burst 40 per player – checked first, before any
+  "stale" answer – and 10/s per element, created only for elements that exist in the document).
+- Actions carry element IDs only. Never put object IDs in element IDs and trust them – keep the object in the handler.
+- `navigate` arguments come back from the client as P_REQUEST `arg`: treat them as user input (check ownership).
+- Every panel shows a header with the server address; inputs are marked "→ sent to the server"; Esc always closes.
+
+## 10. Errors, rejections and troubleshooting
 
 **REJECT codes** (`vystorm:ui` 0x1F; Core: `VystormClientUiRejectEvent`)
 
@@ -851,40 +987,49 @@ above. On Fabric/NeoForge servers register both channels as raw byte payloads (t
 |---|---|
 | No HELLO arrives | Player has no mod; channels not registered/announced; server is not in play phase yet (client waits up to 60 s after join) |
 | HELLO arrives, nothing shows | WELCOME not sent or wrong version; `SERVER_UI` missing; message > 32 KiB; player pressed H (`UI_HIDDEN`); element anchored off-screen; REJECTs |
-| Key K says "This server does not support Vystorm Client" | No WELCOME in this connection |
-| Key K says "This server has no web interface enabled" | WELCOME with empty or invalid `webBase` (the client log names the reason for an invalid one) |
-| "The server wants to show a page – press K" | SHOW/OPEN from the server (mod 0.7.0 never opens pages on server request) |
+| The menu key says "This server does not support Vystorm Client" | No WELCOME in this connection |
+| The menu key says "This server has no web interface enabled" | WELCOME with empty or invalid `webBase` (the client log names the reason for an invalid one) |
+| "The server wants to show a page – press <menu key>" | SHOW/OPEN from the server (mod 0.7.0 never opens pages on server request) |
 | Browser opens, but sign-in fails | Token rejected or expired (TTL), `/login` does not handle the fragment, page not reachable or certificate invalid |
 | "Opening web pages is turned off" | The player set `externalBrowserFallback: false` |
 | Image icon missing | Origin not allowed yet; not `200` + `image/png`; > 64 KiB or > 128 px; redirect; > 64 images |
-| `show` always `false`, menu instead of page | Expected with mod 0.7.0 (no `BROWSER_OVERLAY`); players press K for the web interface |
+| `show` always `false`, menu instead of page | Expected with mod 0.7.0 (no `BROWSER_OVERLAY`); players press the menu key for the web interface |
 
 Protocol violations on `vystorm:web` are dropped silently (after 20 the protocol is off for the connection). DENIED
 messages are shown as a toast.
 
-## 10. Player settings that affect your integration
+## 11. Player settings that affect your integration
 
 `config/vystorm_client/client.json` (invalid values fall back to defaults):
 
 | Key | Default | Effect for servers |
 |---|---|---|
 | `hudVisible` | `true` | `false` = native elements and tooltip lines hidden (key H; reported as `UI_HIDDEN`) |
-| `allowServerOpen` | `true` | `false` = SHOW and server-initiated OPEN are ignored (otherwise they only show a "press K" hint) |
+| `allowServerOpen` | `true` | `false` = SHOW and server-initiated OPEN are ignored (otherwise they only show a "press <menu key>" hint) |
 | `externalBrowserFallback` | `true` | open pages in the system browser (historic name); `false` = the web key opens nothing |
 | `perfLog` | `false` | timing log every 5 s |
+| `nativePanels` | `true` | `false` = the mod does not announce `PANELS`, ignores `vystorm:panel`, and the menu key opens the web page as before |
+| `panelTheme` | `"server"` | panel look: `server` (what the panel asks for), `vystorm` or `vanilla`; display only |
 
 Keys of 0.6.0 and older (`preloadBrowser`, `browserFps`, `keepWarmMinutes`, `pageZoom`, `hardenRinku`) are ignored.
 
 `trust.json` holds the per-server consents (delete to reset); `binds.json` holds the player's own command keys (the
 server can neither read nor trigger them).
 
-Keys (changeable under Controls → Vystorm): **K** open the server's web interface in your browser, **H** show/hide
-server HUD elements, **J** command keys menu.
+Keys (changeable under Controls → Vystorm): **menu key** – default **`** (the key left of 1; **^** on German keyboards;
+**K** until 0.8.2, which Iris uses for "Toggle shaders") – opens the server's menu panel (with Core 0.25.0+; otherwise the
+web interface in your browser), **Shift+menu key** always the web interface in your browser, **H** show/hide server
+HUD elements, **J** command keys menu. Players who already played with an older version keep the key saved in their
+`options.txt`. Hints like "press …" always name the key the player actually bound.
 
-## 11. Versions and compatibility
+## 12. Versions and compatibility
 
 | Mod | Protocol (HELLO) | Notes |
 |---|---|---|
+| 0.8.3 | 1..2 | default menu key `` ` `` instead of K (Iris), trust dialog text fits at every GUI scale, toast margin; protocol unchanged |
+| 0.8.2 | 1..2 | panels: P_REQUEST 2/s like Core, `resync:` with its own budget (also for a broken full OPEN), form fields changed after SUBMIT are kept, timers anchored at receive time |
+| 0.8.1 | 1..2 | panels: crash-safe tables and screen, patches in order with `rev` check (`resync:`), refused OPENs answered with P_CLOSED, form input survives patches/resize |
+| 0.8.0 | 1..2 | native panels: capability bit 7 `PANELS` (190 in total), `vystorm:panel`, K opens the hotkey panel, Shift+K the web page |
 | 0.7.0 | 1..2 | no embedded browser: pages open in the system browser on key press; never sets `BROWSER_OVERLAY`, `JS_BRIDGE`, `OVERLAY_OPEN`, `ORIGIN_TRUSTED`; OPEN_REQUEST only with `target = 1` |
 | 0.6.0 | 1..2 | public release; DENIED for hidden preload is silent |
 | 0.5.0 | 1..2 | command keys (client-only feature) |
@@ -897,11 +1042,14 @@ server HUD elements, **J** command keys menu.
 | 0.20.0 | `vystorm:ui`, `ClientUi`, `ClientElement`, events (capability `web-client-ui`) |
 | 0.21.0 | protocol 2, `STATE_ORIGIN_TRUSTED`, `originTrusted` (capability `web-client-trust`) |
 | 0.23.0 | first public release of Core (recommended minimum) |
+| 0.25.0 | `vystorm:panel`, `panel.Panels`/`PanelSpec`/`Ui`, settings and `/vmenu` as panels |
+| 0.25.2 | refresh results only for the visible session, big opens never overtaken, `resync:` for any session (≤ 1/s), `rev` bumped on full OPENs, patches > 128 KiB as full OPEN |
+| 0.25.1 | panel API with typed builders (capability `panels` since 0.25.1), `resync:` handling, replaced panels kept until P_CLOSED |
 
 Runtime: Minecraft 26.2, Fabric Loader ≥ 0.19.5, Fabric API ≥ 0.161.0+26.2, Java 25. Nothing else (0.6.0 and older
 could use the optional Rinku mod for an embedded browser).
 
-## 12. Checklist
+## 13. Checklist
 
 - [ ] Vanilla fallback exists for every feature (menu, chat link, boss bar, action bar).
 - [ ] Nothing is sent before HELLO; capabilities are checked before sending element types.
@@ -912,3 +1060,7 @@ could use the optional Rinku mod for an embedded browser).
 - [ ] `webBase` is `https`, has a valid certificate and no path.
 - [ ] Tokens are single-use, short-lived, permission-checked and never logged.
 - [ ] REJECTs are logged (rate-limited) during development.
+- [ ] Panels: every action is checked on the server against the document you sent; handlers re-check business rules
+      (money, ownership, permission at the time of the click); IDs in closures, not in element IDs.
+- [ ] Panels: a fallback exists for players without the mod (your chest menu, `dialogFallback(true)` or a web page).
+- [ ] Panels: every P_ACTION gets a P_RESULT; refreshes are coalesced (Core: ≤ 10/s per session).
